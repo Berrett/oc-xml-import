@@ -3,84 +3,9 @@ error_reporting(E_ALL);
 ini_set("display_errors", 1);
 
 require_once('config.php');
-/*
- * configuration settings
- * */
 
-const ENDPOINT = '';
-const PATH_TO_PROD = 'product'; // means whatever->products->product
-const WHEN_KEYS_EXIST = ['name', 'description', 'price', 'MPN']; // only if all these values exist in product context
-const VAT = 24;
-const AVAIL_LANGUAGES = [2];
-const DEFAULT_LANGUAGE = 2;
-const NEW_PRODUCT_STATUS = 0; // 1: active, 0: inactive
-const PARENT_CAT = "Main Category";
-const SPECIFIC_IMG_PATH = "xml-import";
-const IMAGE_DIR = DIR_IMAGE . SPECIFIC_IMG_PATH;
-const SOURCE_DIR = "";
-const CAT_SEPARATOR = '>';
-const TAX_CLASS_ID = 9;
-const STOCK_STATUS_ID = 9;
-const WEIGHT_CLASS_ID = 1;
-const SET_QUANTITY = 'availability:in stock=10|0';
-//const SET_QUANTITY = null;
-const PRODUCT_IDENTIFIER = [
-    'source' => 'model', // opencart
-    'destination' => 'MPN', // xml
-];
-/*
- * opencart field => xml key
- * */
-const DEFAULT_MAPPING = [ // opencart field => xml key
-    'model'             => 'MPN',
-    'name'              => 'name',
-    'description'       => 'description',
-    'sku'               => 'partNo',
-    'mpn'               => 'MPN',
-    'upc'               => 'upc',
-    'ean'               => 'barcode',
-    'jan'               => 'jan',
-    'isbn'              => 'isbn',
-    'image'             => 'image',
-    'status'            => 'status',
-    'price'             => 'price',
-    'manufacturer'      => 'manufacturer',
-    'additional_images' => [
-        'type'  => 'separation', // avail values prefix and array
-        'separator'  => '|', // avail values prefix and array
-        'value' => 'additional_images', // prefix or array
-    ],
-//    'additional_images' => [
-//        'type'  => 'prefix', // avail values prefix and array
-//        'value' => 'images_', // prefix or array
-//    ],
-    'quantity'          => 'availability',
-    'categories'        => 'category',
-    'tags'              => 'tags',
-];
-// opencart fields - let it empty for not update prods
-const UPDATE_FIELDS = [
-    'additional_images',
-    'quantity',
-];
-// opencart fields - let it empty for not create prods
-const CREATE_FIELDS = [
-    'name',
-    'description',
-    'quantity',
-    'price',
-    'model',
-//    'status',
-    'manufacturer',
-    'image',
-//    'ean',
-    'categories'
-];
-
-/*
- * EOF CONFIGURATION
- * */
-
+const ENDPOINT = 'http://localhost/xml_convert.php';
+const PATH_TO_PROD = 'products.product'; // means whatever->products->product
 
 if(is_dir('vqmod')) {
     require_once('./vqmod/vqmod.php');
@@ -115,7 +40,20 @@ class xmlImporter{
     {
         $this->config = new Config();
         $this->registry = new Registry();
-        $this->language_id = DEFAULT_LANGUAGE;
+
+        $this->parent_cat = null;
+        $this->image_path = null;
+        $this->image_dir = null;
+        $this->cat_separator = null;
+        $this->tax_class_id = null;
+        $this->stock_status_id = null;
+        $this->weight_class_id = null;
+        $this->identifier = null;
+        $this->languages = [];
+        $this->available_languages = [];
+        $this->language_id = 1;
+        $this->to_create = [];
+        $this->to_update = [];
 
         $this->products = [];
         $this->create_products = [];
@@ -125,30 +63,25 @@ class xmlImporter{
         $this->existing_cats = [];
         $this->existing_prods = [];
         $this->existing_manufs = [];
-        $this->mapping = [];
 
         $this->dbConnect();
-        $this->getCategories();
-        $this->getProducts();
-        $this->getManufacturers();
-        $this->getMapping();
-
-        if(!is_dir(IMAGE_DIR))
-            mkdir(IMAGE_DIR);
     }
 
     public function copyImage($img_data){
+        if(!is_dir($this->image_dir))
+            mkdir($this->image_dir);
+
         [$img_url, $img_path, $file_name] = $img_data;
-        if(!is_dir(IMAGE_DIR . $img_path))
-            mkdir(IMAGE_DIR . $img_path, 0775, true);
+        if(!is_dir($this->image_dir . '/' . $img_path))
+            mkdir($this->image_dir . '/' . $img_path, 0775, true);
 
         if(strpos($img_url, 'http') === false)
             $img_url = 'https://'.$img_url;
 
-        if(!file_exists(IMAGE_DIR . $img_path . '/' . $file_name))
-            copy($img_url, IMAGE_DIR . $img_path . '/' . $file_name);
+        if(!file_exists($this->image_dir . '/' . $img_path . '/' . $file_name))
+            copy($img_url, $this->image_dir . '/' . $img_path . '/' . $file_name);
 
-        return SPECIFIC_IMG_PATH . $img_path . '/' . $file_name;
+        return $this->image_path . '/' . $img_path . '/' . $file_name;
 
     }
 
@@ -162,8 +95,8 @@ class xmlImporter{
     public function executeCreateProducts()
     {
         foreach($this->create_products as $data) {
-            $stock_status_id = (int)($this->setValue($data, 'stock_status_id') ?? STOCK_STATUS_ID);
-            $weight_class_id = (int)($this->setValue($data, 'weight_class_id') ?? WEIGHT_CLASS_ID);
+            $stock_status_id = (int)($this->setValue($data, 'stock_status_id') ?? $this->stock_status_id);
+            $weight_class_id = (int)($this->setValue($data, 'weight_class_id') ?? $this->weight_class_id);
             $minimum = $this->setValue($data, 'minimum') ?? 1;
             $subtract = $this->setValue($data, 'subtract') ?? 1;
             $shipping = $this->setValue($data, 'shipping') ?? 0;
@@ -173,8 +106,8 @@ class xmlImporter{
             $width = $this->setValue($data, 'width') ?? 1;
             $height = $this->setValue($data, 'height') ?? 1;
             $length_class_id = $this->setValue($data, 'length_class_id') ?? 1;
-            $status = $this->setValue($data, 'status') ?? NEW_PRODUCT_STATUS;
-            $tax_class_id = $this->setValue($data, 'tax_class_id') ?? TAX_CLASS_ID;
+            $status = $this->setValue($data, 'status') ?? 0;
+            $tax_class_id = $this->setValue($data, 'tax_class_id') ?? $this->tax_class_id;
             $sort_order = $this->setValue($data, 'sort_order') ?? 1;
             $manufacturer_id = $this->setValue($data, 'manufacturer');
             $quantity = $this->setValue($data, 'quantity') ?? 0;
@@ -227,8 +160,8 @@ class xmlImporter{
                 }
             }
 
-            foreach (AVAIL_LANGUAGES as $language_id) {
-                $this->db->query("INSERT INTO " . DB_PREFIX . "product_description SET product_id = '" . (int)$product_id . "', language_id = '" . (int)$language_id . "', name = '" . $this->db->escape($data['name']) . "', description = '" . $this->db->escape($data['description']) . "', tag = '" . $this->db->escape($data['tags']) . "', meta_title = '" . $this->db->escape($data['name']) . "', meta_description = '" . strip_tags($this->db->escape($data['description'])) . "'");
+            foreach ($this->available_languages as $language_id) {
+                $this->db->query("INSERT INTO " . DB_PREFIX . "product_description SET product_id = '" . (int)$product_id . "', language_id = '" . (int)$language_id . "', name = '" . $this->db->escape($data['name'][$language_id]) . "', description = '" . $this->db->escape($data['description'][$language_id]) . "', tag = '" . $this->db->escape($data['tags'][$language_id]) . "', meta_title = '" . $this->db->escape($data['name'][$language_id]) . "', meta_description = '" . strip_tags($this->db->escape($data['description'][$language_id])) . "'");
             }
 
             $this->db->query("INSERT INTO " . DB_PREFIX . "product_to_store SET product_id = '" . (int)$product_id . "', store_id = '0'");
@@ -237,6 +170,8 @@ class xmlImporter{
                 foreach ($data['categories'] as $category_id) {
                     $this->db->query("INSERT INTO " . DB_PREFIX . "product_to_category SET product_id = '" . (int)$product_id . "', category_id = '" . (int)$category_id . "'");
                 }
+            }else{
+                $this->db->query("INSERT INTO " . DB_PREFIX . "product_to_category SET product_id = '" . (int)$product_id . "', category_id = '" . (int)$this->parent_id . "'");
             }
 
             $this->db->query("INSERT INTO " . DB_PREFIX . "product_to_layout SET product_id = '" . (int)$product_id . "', store_id = '0', layout_id = '0'");
@@ -246,7 +181,6 @@ class xmlImporter{
     public function executeUpdateProducts()
     {
         foreach($this->update_products as $data) {
-
             $run = false;
             $sql = "UPDATE " . DB_PREFIX . "product SET
              date_modified = NOW()";
@@ -268,8 +202,8 @@ class xmlImporter{
 
             if(array_key_exists('name', $data) && array_key_exists('description', $data) ) {
                 $this->db->query("DELETE FROM " . DB_PREFIX . "product_description WHERE product_id = '" . (int)$data['id'] . "'");
-                foreach (AVAIL_LANGUAGES as $language_id) {
-                    $this->db->query("INSERT INTO " . DB_PREFIX . "product_description SET product_id = '" . (int)$data['id'] . "', language_id = '" . (int)$language_id . "', name = '" . $this->db->escape($data['name']) . "', description = '" . $this->db->escape($data['description']) . "', meta_title = '" . $this->db->escape($data['name']) . "', meta_description = '" . strip_tags($this->db->escape($data['description'])) . "'");
+                foreach ($this->available_languages as $language_id) {
+                    $this->db->query("INSERT INTO " . DB_PREFIX . "product_description SET product_id = '" . (int)$data['id'] . "', language_id = '" . (int)$language_id . "', name = '" . $this->db->escape($data['name'][$language_id]) . "', description = '" . $this->db->escape($data['description'][$language_id]) . "', tag = '" . $this->db->escape($data['tags'][$language_id]) . "', meta_title = '" . $this->db->escape($data['name'][$language_id]) . "', meta_description = '" . strip_tags($this->db->escape($data['description'][$language_id])) . "'");
                 }
             }
 
@@ -294,83 +228,52 @@ class xmlImporter{
         foreach($this->products as $key => $product) {
 
             if($product_info = $this->productExist($product)) {
-                if(empty(UPDATE_FIELDS) || $product_info['product_id'] <= 20556)
+                if(count($this->to_update) == 0)
                     continue;
-
-                $action_fields = UPDATE_FIELDS;
+                $action_fields = $this->to_update;
                 $item['id'] = $product_info['product_id'];
                 $item['old_price'] = $product_info['price'];
-//                $item['name'] = $product_info['name'];
-//                $item['description'] = $product_info['description'];
-//                $item['quantity'] = $product_info['quantity'];
                 $action_key = 'update_products';
             }
             else {
-                if(count(CREATE_FIELDS) == 0)
+                if(count($this->to_create) == 0 || $product['name'][$this->language_id] == '')
                     continue;
 
-                $item['name'] = '';
-                $item['description'] = '';
+                $item['description'] = [];
+                $item['tags'] = [];
+                foreach ($this->available_languages as $language) {
+                    $item['description'][$language] = '';
+                    $item['tags'][$language] = '';
+
+                }
                 $item['model'] = '';
-                $item['tags'] = '';
                 $item['price '] = 0.0;
-                $action_fields = CREATE_FIELDS;
+                $action_fields = $this->to_create;
                 $action_key = 'create_products';
             }
 
             foreach ($action_fields as $action_field) {
-                if(!array_key_exists($action_field, $this->mapping))
-                    dd('key '.$action_field .' does not exist in xml!');
+                if(!array_key_exists($action_field, $product))
+                    continue;
 
                 switch ($action_field){
-                    case 'price':
-                        $price = str_replace('€','', $product[$this->mapping[$action_field]]);
-                        $price = str_replace(',','.', $price);
-                        $item[$action_field] = $this->removeVAT(trim($price));
-                        break;
                     case 'image':
-                        $item[$action_field] = $this->prepareImage($product[$this->mapping[$action_field]]);
+                        $item[$action_field] = $this->prepareImage($product[$action_field]);
                         break;
                     case 'manufacturer':
-                        $item[$action_field] = $this->prepareManufacturer($product[$this->mapping[$action_field]]);
+                        $item[$action_field] = $this->prepareManufacturer($product[$action_field]);
                         break;
                     case 'additional_images':
                         $item[$action_field] = [];
-                        foreach ($product[$action_field] as $image)
+                        foreach ($product[$action_field] as $image) {
                             $item[$action_field][] = $this->prepareImage($image);
+                        }
                         break;
                     case 'categories':
-                        $item[$action_field] = array_unique($this->prepareCategories($product[$this->mapping[$action_field]]));
-                        break;
-                    case 'model':
-                        $item[$action_field] = $product[$this->mapping[$action_field]];
-                        break;
-                    case 'quantity':
-                        $quantity = null;
-                        if(is_int(SET_QUANTITY))
-                            $quantity = SET_QUANTITY;
-                        elseif(is_string(SET_QUANTITY)) {
-                            if(strpos(SET_QUANTITY, '|')) {
-                                $q = explode('|', SET_QUANTITY);
-                                $quantity = $q[1]; // after last pipe is something like else
-                                for ($i = 0; $i < count($q) - 1; $i++) {
-                                    $cond = explode(':', $q[$i]);
-                                    $re = explode('=', $cond[1]);
-                                    if ($product[$cond[0]] == $re[0]) {
-                                        $quantity = $re[1];
-                                        break;
-                                    }
-                                }
-                            }
-                            else{
-                                $quantity = (int)$product[$this->mapping[$action_field]];
-                            }
-                        }
-                        $item[$action_field] = (int)$quantity;
+                        $item[$action_field] = array_unique($this->prepareCategories($product[$action_field]));
                         break;
                     default:
-                        if(array_key_exists($this->mapping[$action_field], $product))
-                            $item[$action_field] = $product[$this->mapping[$action_field]];
+                        $item[$action_field] = $product[$action_field];
                 }
             }
 
@@ -385,47 +288,33 @@ class xmlImporter{
 
     public function addProductToList($item){
         $product['additional_images'] = [];
-        $foundCount = 0;
         foreach($item as $key => $value) {
-            if (in_array($key, WHEN_KEYS_EXIST)) {
-                $foundCount++;
-            }
-            // additional images
-            if(array_key_exists('additional_images', $this->mapping) &&
-                array_key_exists('type', $this->mapping['additional_images']) &&
-                array_key_exists('value', $this->mapping['additional_images']) &&
-                $this->mapping['additional_images']['type'] == 'prefix' &&
-                strpos($key,$this->mapping['additional_images']['value']) !== false
-            ){
-                $product['additional_images'][] = (string)$value;
-            }elseif(array_key_exists('additional_images', $this->mapping) &&
-                array_key_exists('type', $this->mapping['additional_images']) &&
-                array_key_exists('value', $this->mapping['additional_images']) &&
-                $this->mapping['additional_images']['type'] == 'array' &&
-                $key == $this->mapping['additional_images']['value']
-            ){
-                $product['additional_images'] = $value;
-            }elseif(array_key_exists('additional_images', $this->mapping) &&
-                array_key_exists('type', $this->mapping['additional_images']) &&
-                array_key_exists('value', $this->mapping['additional_images']) &&
-                $this->mapping['additional_images']['type'] == 'separation' &&
-                $key == $this->mapping['additional_images']['value']
-            ){
-                $product['additional_images'] = explode($this->mapping['additional_images']['separator'], $value);
+            if('image' === $key) {
+                $product[$key] = (array)$value;
+            }elseif('additional_images' === $key) {
+                $product[$key] = [];
+                foreach (array_values((array)$value) as $val) {
+                    $product[$key][] = [
+                        'name' => trim((string)$val->name),
+                        'url' => trim((string)$val->url),
+                    ];
+                }
+            }elseif('name' === $key || 'description' === $key) {
+                $product[$key] = [];
+                $value = (array)$value;
+                foreach ($this->languages as $language_id => $language) {
+                    $product[$key][$language_id] = trim((string)$value[$language]);
+                }
             }else{
                 $product[$key] = trim((string)$value);
             }
         }
-
-        if($foundCount != count(WHEN_KEYS_EXIST))
-            return;
-
         $this->products[] = $product;
     }
 
     public function productExist($xml_product){
         $product = array_filter($this->existing_prods, function($product) use($xml_product){
-            return $product[PRODUCT_IDENTIFIER['source']] == $xml_product[PRODUCT_IDENTIFIER['destination']];
+            return $product[$this->identifier] == $xml_product['uuid'];
         });
 
         if(count($product) > 0)
@@ -434,79 +323,24 @@ class xmlImporter{
             return false;
     }
 
-    public function removeVAT($price){
-        if(!is_numeric($price))
-            $price = 0;
-        $gross = $price;
-        $nett = $gross/(1 + VAT / 100);
-        return $nett;
-    }
-
-    public function addVat($price){
-        if(!is_numeric($price))
-            $price = 0;
-        $gross = $price;
-        $nett = $gross*(1 + VAT / 100);
-        return round($nett, 2);
-    }
-
     public function prepareImage($img){
-        $img_path = str_replace(SOURCE_DIR, '', $img);
-        $img_parts = explode('/', $img_path);
+        $img_parts = explode('/', $img['name']);
         $file_name = $img_parts[count($img_parts) - 1];
         array_pop($img_parts);
         $img_path = implode('/', $img_parts);
-        return [$img, $img_path, $file_name];
+        return [$img["url"], $img_path, $file_name];
     }
-
-    /*
-    public function prepareCategories($new_category_path){
-        $new_category_path = PARENT_CAT . '|||' . str_replace(', ', '|||', $new_category_path);
-
-        $category = array_filter($this->existing_cats, function($cat)use($new_category_path){
-            return $cat['path_name'] == $new_category_path;
-        });
-
-        if(!empty($category))
-            return array_values($category)[0]['category_id'];
-        else{
-            $new_category_path_names = explode('|||', $new_category_path);
-            $parent_id = 0;
-            $path_name = [];
-            foreach ($new_category_path_names as $new_category_name) {
-                $path_name[] = $new_category_name;
-                $category = array_filter($this->existing_cats, function($cat)use($new_category_name, $parent_id, $path_name){
-                    return $cat['path_name'] == implode('|||', $path_name) && $cat['parent_id'] == $parent_id;
-                });
-
-                if(!empty($category))
-                    $parent_id = array_values($category)[0]['category_id'];
-                else {
-                    $prev_parent_id = $parent_id;
-                    $parent_id = $this->createCategory($new_category_name, $parent_id);
-                    $this->existing_cats[$parent_id] = [
-                        'category_id' => $parent_id,
-                        'parent_id' => $prev_parent_id,
-                        'path_name' => implode('|||', $path_name),
-                        'name' => $new_category_name
-                    ];
-                }
-            }
-            return $parent_id;
-        }
-    }
-    */
 
     public function createParentCategory(){
-        $query = $this->db->query("SELECT category_id FROM `" . DB_PREFIX . "category_description` WHERE name = '" . PARENT_CAT . "' ORDER BY category_id DESC LIMIT 1");
+        $query = $this->db->query("SELECT category_id FROM `" . DB_PREFIX . "category_description` WHERE name = '" . $this->parent_cat . "' ORDER BY category_id DESC LIMIT 1");
         if($query->row)
             $this->parent_id = $query->row['category_id'];
         else
-            $this->parent_id = $this->createCategory(PARENT_CAT, 0);
+            $this->parent_id = $this->createCategory($this->parent_cat, 0);
     }
 
     public function prepareCategories($new_categories){
-        $new_categories = explode(CAT_SEPARATOR, $new_categories);
+        $new_categories = explode($this->cat_separator, $new_categories);
 
         $categories = [];
         $parent_id = $this->parent_id;
@@ -515,7 +349,7 @@ class xmlImporter{
             if(strpos($new_category, '[') !== false || $new_category == '')
                 continue;
 
-            $new_category_path = PARENT_CAT . '|||' . $new_category;
+            $new_category_path = $this->parent_cat . '|||' . $new_category;
 
             $category = array_filter($this->existing_cats, function($cat)use($new_category_path){
                 return $cat['path_name'] == $new_category_path;
@@ -569,7 +403,7 @@ class xmlImporter{
 
         $category_id = $this->db->getLastId();
 
-        foreach (AVAIL_LANGUAGES as $language_id) {
+        foreach ($this->available_languages as $language_id) {
             $this->db->query("INSERT INTO " . DB_PREFIX . "category_description SET category_id = '" . (int)$category_id . "', language_id = '" . (int)$language_id . "', name = '" . $this->db->escape($category_name) . "', description = '" . $category_name . "', meta_title = '" . $category_name . "', meta_description = '" . $category_name . "', meta_keyword = '" . $category_name . "'");
         }
 
@@ -626,7 +460,6 @@ class xmlImporter{
         WHERE pd.language_id = ".$this->language_id." ORDER BY name ASC");
 
         $this->existing_prods = $query->rows;
-
     }
 
     public function getManufacturers()
@@ -686,22 +519,32 @@ class xmlImporter{
         $txt .= "name - old price => new price\n";
         fwrite($myfile, $txt);
         foreach ($this->update_products as $update_product) {
-            if(array_key_exists('price', $update_product))
-                $txt = $update_product['id'] . " - " . $this->addVat($update_product['old_price']) . " => " . $this->addVat($update_product['price']) . "\n";
-            else
-                $txt = $update_product['id'];
+            $txt = $update_product['id'] . "\n";
             fwrite($myfile, $txt);
         }
         fclose($myfile);
-    }
-
-    private function getMapping(){
-        $this->mapping = DEFAULT_MAPPING;
     }
 }
 
 $xml_importer = new xmlImporter();
 $xml = $xml_importer->getXml();
+$xml_importer->parent_cat = trim((string)$xml->parent_cat);
+$xml_importer->image_path = trim((string)$xml->image_path);
+$xml_importer->image_dir = DIR_IMAGE . trim((string)$xml_importer->image_path);
+$xml_importer->cat_separator = trim((string)$xml->cat_separator);
+$xml_importer->tax_class_id = trim((int)$xml->tax_class_id);
+$xml_importer->stock_status_id = trim((int)$xml->stock_status_id);
+$xml_importer->weight_class_id = trim((int)$xml->weight_class_id);
+$xml_importer->identifier = trim((string)$xml->identifier);
+$xml_importer->to_create = json_decode(trim((string)$xml->to_create), true);
+$xml_importer->to_update = json_decode(trim((string)$xml->to_update), true);
+$xml_importer->languages = json_decode(trim((string)$xml->languages), true);
+$xml_importer->available_languages = array_keys($xml_importer->languages);
+$xml_importer->language_id = array_key_first($xml_importer->languages);
+
+$xml_importer->getCategories();
+$xml_importer->getProducts();
+$xml_importer->getManufacturers();
 
 $segments = explode('.', PATH_TO_PROD);
 
@@ -714,14 +557,14 @@ foreach ($segments as $segment) {
     else
         dd($segment . ' does not exist in xml path!');
 }
+
 $f = 0;
 foreach ($currentElement as $item){
     $f++;
-    if($f>=1150)break;
-    if($f<1050)continue;
+//    if($f>=1150)break;
+//    if($f<1050)continue;
     $xml_importer->addProductToList($item);
 }
-//dd($xml_importer->products);
 $xml_importer->createParentCategory();
 $xml_importer->prepareProducts();
 $xml_importer->executeCreateProducts();
